@@ -1,37 +1,35 @@
 import argparse
-import musicbrainzngs
-import requests
-from requests.exceptions import HTTPError
-from json.decoder import JSONDecodeError
 import numpy as np
 import asyncio
 import aiohttp
-import re
+import urllib.parse
+import json
+import logging
 
 
-def get_artist_details(artist):
+async def get_artist_details(session, artist):
 
-    result = musicbrainzngs.search_artists(sortname=artist, limit=1)
-    artistid = result['artist-list'][0].get('id')
-    artistname = result['artist-list'][0].get('name')
-
+    artist = urllib.parse.quote(artist, safe='')
+    async with session.get('http://musicbrainz.org/ws/2/artist/?query={}&limit=1&fmt=json'.format(artist)) as response:
+        result = await response.json()
+        artistid = result['artists'][0].get('id')
+        artistname = result['artists'][0].get('name')
     return artistid, artistname
 
+async def get_song_list(session, id):
 
-def get_song_list(id):
-
-    # Get list of song titles
-    works = musicbrainzngs.search_works(arid=id, limit=100)
-    work_count = works.get('work-count')
-    pages = int(np.ceil(work_count / 100.0))
-    songs = works.get('work-list')
-    titles = [song.get('title') for song in songs]
-
-    for page in range(1, pages):
-        offset = page * 100
-        works = musicbrainzngs.search_works(arid=id, limit=100, offset=offset)
-        for song in works.get('work-list'):
-            titles.append(song.get('title'))
+    titles = []
+    offset = 0
+    while True:
+        async with session.get('https://musicbrainz.org/ws/2/work/?artist={}&limit=100&offset={}&fmt=json'.format(id, offset)) as response:
+            result = await response.read()
+            result = json.loads(result)
+            works = result.get('works')
+            if not works:
+                break
+            offset += 100
+            for song in works:
+                titles.append(song.get('title'))
     return titles
 
 
@@ -39,36 +37,41 @@ async def count_lyrics(session, title, artistname):
 
     # Count lyrics of each song
 
-    title = re.sub('[^0-9a-zA-Z]+', ' ', title)
+    title = urllib.parse.quote(title, safe='')
 
     try:
         async with session.get('https://api.lyrics.ovh/v1/{}/{}'.format(artistname, title)) as response:
-            lyrics = await response.json()
-            return len(lyrics.get('lyrics', '').replace('\n',' ').split())
+            result = await response.read()
+            result = json.loads(lyrics)
+            lyrics = lyrics.get('lyrics')
+            if lyrics:
+                return lyrics.replace('\n',' ').split())
+            else:
+                return
 
-    except (HTTPError, JSONDecodeError, aiohttp.client_exceptions.ContentTypeError):
+    except:
         pass
-
 
 
 async def calculate_statistics(artist):
 
-    artistid, artistname = get_artist_details(artist)
-
-    titles = get_song_list(artistid)
-
     async with aiohttp.ClientSession() as session:
+        artistid, artistname = await get_artist_details(session, artist)
+        titles = await get_song_list(session, artistid)
         lyric_count = await asyncio.gather(*[count_lyrics(session, title, artistname) for title in titles])
 
-    print(lyric_count)
+    if lyric_count:
+        lyric_count = np.array(lyric_count)
+        lyric_count = lyric_count[lyric_count != np.array(None)]
 
     # Caluculate statistics
-    if lyric_count:
+
         mean = np.mean(lyric_count)
         std = np.std(lyric_count)
         var = np.var(lyric_count)
         min = np.amin(lyric_count)
         max = np.amax(lyric_count)
+        print(artistname)
         print('mean: {}'.format(mean))
         print('standard deviation: {}'.format(std))
         print('variance: {}'.format(var))
@@ -81,7 +84,6 @@ def main():
     parser.add_argument('artists', type=str, nargs='+', help='The artist name')
     args = parser.parse_args()
     artists = " ".join(args.artists).split(',')
-    musicbrainzngs.set_useragent('lyric-counter', '0.1.0')
     for artist in artists:
         asyncio.run(calculate_statistics(artist))
 
