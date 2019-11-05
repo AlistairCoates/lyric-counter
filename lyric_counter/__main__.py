@@ -4,6 +4,9 @@ import requests
 from requests.exceptions import HTTPError
 from json.decoder import JSONDecodeError
 import numpy as np
+import asyncio
+import aiohttp
+import re
 
 
 def get_artist_details(artist):
@@ -32,28 +35,32 @@ def get_song_list(id):
     return titles
 
 
-def count_lyrics(titles, artistname):
+async def count_lyrics(session, title, artistname):
 
     # Count lyrics of each song
-    lyric_count = []
-    for title in titles:
-        try:
-            result = requests.get('https://api.lyrics.ovh/v1/{}/{}'.format(artistname, title))
-            lyrics = len(result.json().get('lyrics', '').replace('\n',' ').split())
-            if lyrics > 0:
-                lyric_count.append(lyrics)
-        except (HTTPError, JSONDecodeError):
-            pass
-    return lyric_count
+
+    title = re.sub('[^0-9a-zA-Z]+', ' ', title)
+
+    try:
+        async with session.get('https://api.lyrics.ovh/v1/{}/{}'.format(artistname, title)) as response:
+            lyrics = await response.json()
+            return len(lyrics.get('lyrics', '').replace('\n',' ').split())
+
+    except (HTTPError, JSONDecodeError, aiohttp.client_exceptions.ContentTypeError):
+        pass
 
 
-def calculate_statistics(artist):
+
+async def calculate_statistics(artist):
 
     artistid, artistname = get_artist_details(artist)
 
     titles = get_song_list(artistid)
 
-    lyric_count = count_lyrics(titles, artistname)
+    async with aiohttp.ClientSession() as session:
+        lyric_count = await asyncio.gather(*[count_lyrics(session, title, artistname) for title in titles])
+
+    print(lyric_count)
 
     # Caluculate statistics
     if lyric_count:
@@ -76,7 +83,7 @@ def main():
     artists = " ".join(args.artists).split(',')
     musicbrainzngs.set_useragent('lyric-counter', '0.1.0')
     for artist in artists:
-        calculate_statistics(artist)
+        asyncio.run(calculate_statistics(artist))
 
 if __name__ == '__main__':
    main()
